@@ -6,9 +6,9 @@ The mod is built to be editable without Lua knowledge. EXP values and target rul
 
 ## Installation
 
-- Unpack the content to `\steamapps\common\Windrose\R5\Binaries\Win64`
-- Mod (.lua) should be located in `\steamapps\common\Windrose\R5\Binaries\Win64\ue4ss\Mods\KillExpMod`
-- UE4SS-RE after unpack should be in root folder at `Win64` like `\steamapps\common\Windrose\R5\Binaries\Win64\ue4ss`
+- Unpack the content to `\steamapps\common\Windrose\`
+- Mod (.lua) should be located in `\steamapps\common\Windrose\`
+- UE4SS-RE after unpack should be in root folder at `Win64` like `\steamapps\common\Windrose\`
 The mod is built to be editable without Lua knowledge. EXP values, target rules, and basic caps live in `Config/exp_rules.json`.
 
 ## Status
@@ -42,7 +42,7 @@ Expected behavior:
 
 ## Install
 
-This repository is laid out like the Windrose game folder. Copy or extract the release contents into the Windrose install directory, so the files land under `Windrose/R5/...`.
+This repository is laid out like the Windrose game folder. Copy or extract the release contents into the Windrose install directory, so the files land under `Windrose/...`.
 
 Expected installed layout:
 
