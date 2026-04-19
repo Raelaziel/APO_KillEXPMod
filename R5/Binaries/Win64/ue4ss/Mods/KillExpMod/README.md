@@ -2,13 +2,6 @@
 
 UE4SS Lua mod for Windrose that grants player EXP after killing enemies, wildlife, undead, pirates, bosses, and hostile ships.
 
-The mod is built to be editable without Lua knowledge. EXP values and target rules live in a separate JSON config file.
-
-## Installation
-
-- Unpack the content to `\steamapps\common\Windrose\R5\Binaries\Win64`
-- Mod (.lua) should be located in `\steamapps\common\Windrose\R5\Binaries\Win64\ue4ss\Mods\KillExpMod`
-- UE4SS-RE after unpack should be in root folder at `Win64` like `\steamapps\common\Windrose\R5\Binaries\Win64\ue4ss`
 The mod is built to be editable without Lua knowledge. EXP values, target rules, and basic caps live in `Config/exp_rules.json`.
 
 ## Status
@@ -24,7 +17,7 @@ What works:
 - Grants EXP after a valid kill.
 - Uses Windrose's own EXP reward path, so the normal in-game EXP notification can appear.
 - Reads mob and ship EXP values from `Config/exp_rules.json`.
-- Ships with 69 target rules split into wildlife, undead, pirates, corrupted enemies, bosses, and ships.
+- Ships with 69 default target rules split into wildlife, undead, pirates, corrupted enemies, bosses, and ships.
 - Supports friendly/player-owned exclusions by setting EXP to `0`.
 - Supports configurable level and talent point caps for kill EXP.
 - Prevents duplicate EXP from the same killed actor.
@@ -42,32 +35,25 @@ Expected behavior:
 
 ## Install
 
-This repository is laid out like the Windrose game folder. Copy or extract the release contents into the Windrose install directory, so the files land under `Windrose/R5/...`.
-
-Expected installed layout:
+This release is meant to be installed under the Windrose game folder. The active runtime paths should be:
 
 ```text
-Windrose/
-  R5/
-    Binaries/
-      Win64/
-        dwmapi.dll
-        ue4ss/
-          UE4SS.dll
-          UE4SS-settings.ini
-          Mods/
-            mods.json
-            mods.txt
-            KillExpMod/
-              README.md
-              Config/
-                exp_rules.json
-              Scripts/
-                main.lua
-                kill_exp_config.lua
-    Content/
-      Paks/
-        pakchunk99-KillExpMod_HeroLevels_P.pak
+Windrose/R5/Binaries/Win64/dwmapi.dll
+Windrose/R5/Binaries/Win64/ue4ss/UE4SS.dll
+Windrose/R5/Binaries/Win64/ue4ss/Mods/KillExpMod/
+Windrose/R5/Content/Paks/pakchunk99-KillExpMod_HeroLevels_P.pak
+```
+
+Expected mod folder layout:
+
+```text
+KillExpMod/
+  README.md
+  Config/
+    exp_rules.json
+  Scripts/
+    main.lua
+    kill_exp_config.lua
 ```
 
 Do not install the mod into a backup UE4SS folder such as `BAK_ue4ss`. The active folder must be named `ue4ss`.
@@ -76,7 +62,7 @@ The Lua mod can grant kill EXP without the pak patch, but the game only has 15 h
 
 ## Release Files
 
-The current repository structure contains these runtime paths:
+A complete release should include these paths:
 
 ```text
 R5/Binaries/Win64/dwmapi.dll
@@ -84,7 +70,7 @@ R5/Binaries/Win64/ue4ss/
 R5/Content/Paks/pakchunk99-KillExpMod_HeroLevels_P.pak
 ```
 
-The UE4SS files handle runtime kill EXP. The pak file handles the level 100 table. Release archives should preserve this `R5/...` layout.
+The UE4SS folder is responsible for kill EXP rules and runtime hooks. The pak file is responsible for the level 100 table.
 
 ## Editing EXP Values
 
@@ -97,7 +83,7 @@ R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Config/exp_rules.json
 Each rule looks like this:
 
 ```json
-{ "group": "Custom enemies", "pattern": "BP_Mob_NewEnemy_C", "exp": 75, "note": "New enemy" }
+{ "group": "Small wildlife", "pattern": "BP_Mob_Dodo_C", "exp": 25, "note": "Dodo" }
 ```
 
 Fields:
@@ -110,7 +96,7 @@ Fields:
 
 Rule order matters. Put more specific patterns above general fallback patterns.
 
-Current default config:
+Current default table:
 
 - 69 rules.
 - EXP range is `0` to `700`.
@@ -169,8 +155,8 @@ This mod is not guaranteed to be pure server-side. It relies on UE4SS runtime ho
 
 Recommended setup:
 
-- Singleplayer: install both the UE4SS mod files and the pak patch locally.
-- Co-op/listen server: use the same files and config on host and clients for consistent behavior.
+- Singleplayer: install both the UE4SS mod folder and the pak patch locally.
+- Co-op/listen server: install the same files on the host and clients for consistent behavior.
 - If duplicated EXP appears in multiplayer, test host-only installation and disable the UE4SS mod on clients.
 
 ## Adding New Enemies
@@ -200,23 +186,11 @@ Keep the JSON valid:
 No logs and no EXP:
 
 - The mod is probably in the wrong UE4SS folder.
-- No UE4SS exist at all
 - Verify this exact path exists:
 
 ```text
 Windrose/R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/main.lua
 ```
-
-Log says the config was not loaded:
-
-- Check that `Config/exp_rules.json` exists.
-- Check that the JSON is valid.
-- Restore the original file if needed.
-
-EXP works for some enemies but not others:
-
-- The missing target probably has no matching `pattern`.
-- Add a new rule with the Blueprint/class fragment from the log.
 - Verify `Windrose/R5/Binaries/Win64/ue4ss/Mods/mods.txt` contains `KillExpMod : 1`.
 - Verify `Windrose/R5/Binaries/Win64/ue4ss/Mods/mods.json` has `"mod_enabled": true` for `KillExpMod`.
 

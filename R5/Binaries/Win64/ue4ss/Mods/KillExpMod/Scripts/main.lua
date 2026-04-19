@@ -15,7 +15,7 @@ local CONFIG_PATHS = {
 }
 
 local MOD_NAME = "KillExpMod"
-local MOD_BUILD = "2026-04-19-config-json"
+local MOD_BUILD = "2026-04-19-caps-config"
 local HIDE_EXP_NOTIFICATION = false
 local DEDUPE_TTL_SECONDS = 30
 local PREWARM_DELAY_MS = 2000

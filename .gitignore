@@ -1,0 +1,17 @@
+# Runtime logs and crash output should not be published.
+*.log
+*.dmp
+*.mdmp
+*.tmp
+
+# UE4SS/game runtime output.
+R5/Binaries/Win64/ue4ss/*.log
+R5/Binaries/Win64/ue4ss/Mods/*/Saved/
+R5/Binaries/Win64/ue4ss/Mods/*/Logs/
+R5/Binaries/Win64/ue4ss/Mods/*/CrashDumps/
+
+# Legacy repo layouts, kept ignored in case someone tests locally.
+ue4ss/UE4SS.log
+ue4ss/Mods/*/Saved/
+ue4ss/Mods/*/Logs/
+ue4ss/Mods/*/CrashDumps/
