@@ -9,6 +9,7 @@ The mod is built to be editable without Lua knowledge. EXP values and target rul
 - Unpack the content to `\steamapps\common\Windrose\`
 - Mod (.lua) should be located in `\steamapps\common\Windrose\`
 - UE4SS-RE after unpack should be in root folder at `Win64` like `\steamapps\common\Windrose\`
+- .pak Mod file called `pakchunk99-KillExpMod_HeroLevels_P.pak` needs to be in `\steamapps\common\Windrose\R5\Content\Paks`
 The mod is built to be editable without Lua knowledge. EXP values, target rules, and basic caps live in `Config/exp_rules.json`.
 
 ## Status
