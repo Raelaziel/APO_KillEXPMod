@@ -115,7 +115,11 @@ The top of `exp_rules.json` contains:
   "no_match_log_limit": 5,
   "cap_log_limit": 5,
   "level_cap": 100,
-  "talent_points_cap": 300
+  "talent_points_cap": 300,
+  "cap_cache_window_ms": 5000,
+  "cap_cache_window_far_ms": 30000,
+  "cap_near_level_margin": 5,
+  "cap_near_talent_margin": 15
 }
 ```
 
@@ -128,6 +132,10 @@ Settings:
 - `cap_log_limit`: max number of cap-related logs per session.
 - `level_cap`: kill EXP is skipped once the player is at this level or above.
 - `talent_points_cap`: kill EXP is skipped if the loaded talent UI/progression VM reports this many available talent points or more.
+- `cap_cache_window_ms`: how long level/talent cap data stays cached when the player is near a cap.
+- `cap_cache_window_far_ms`: how long level/talent cap data stays cached when the player is comfortably below the caps.
+- `cap_near_level_margin`: how many levels below `level_cap` counts as near-cap behavior.
+- `cap_near_talent_margin`: how many talent points below `talent_points_cap` counts as near-cap behavior.
 
 For normal use, leave these values unchanged.
 
@@ -191,6 +199,7 @@ No logs and no EXP:
 ```text
 Windrose/R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/main.lua
 ```
+
 - Verify `Windrose/R5/Binaries/Win64/ue4ss/Mods/mods.txt` contains `KillExpMod : 1`.
 - Verify `Windrose/R5/Binaries/Win64/ue4ss/Mods/mods.json` has `"mod_enabled": true` for `KillExpMod`.
 
