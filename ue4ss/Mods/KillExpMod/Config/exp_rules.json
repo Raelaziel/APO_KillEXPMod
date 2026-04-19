@@ -5,7 +5,10 @@
     "hide_exp_notification": false,
     "dedupe_ttl_seconds": 30,
     "prewarm_delay_ms": 2000,
-    "no_match_log_limit": 5
+    "no_match_log_limit": 5,
+    "cap_log_limit": 5,
+    "level_cap": 100,
+    "talent_points_cap": 300
   },
   "rules": [
     { "group": "Friendly and player-owned actors", "pattern": "BP_Mob_Boar_FriendLvl2_C", "exp": 0, "note": "Friendly boar" },

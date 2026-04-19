@@ -20,6 +20,9 @@ local HIDE_EXP_NOTIFICATION = false
 local DEDUPE_TTL_SECONDS = 30
 local PREWARM_DELAY_MS = 2000
 local NO_MATCH_LOG_LIMIT = 5
+local CAP_LOG_LIMIT = 5
+local LEVEL_CAP = 100
+local TALENT_POINTS_CAP = 300
 
 local EXP_BY_TARGET = {}
 
@@ -27,11 +30,15 @@ local unpackArgs = table.unpack or unpack
 local awardedKills = {}
 local awardEvents = 0
 local noMatchLogs = 0
+local capLogs = 0
 local cachedPlayerController = nil
 local cachedPlayerCharacter = nil
 local cachedPlayerState = nil
 local cachedScenarioComponent = nil
 local cachedAddExpTaskClass = nil
+local cachedProgressionObserver = nil
+local cachedEntityProgressionVM = nil
+local cachedTalentTreeVM = nil
 
 local function log(message)
     print(string.format("[%s] %s\n", MOD_NAME, tostring(message)))
@@ -93,6 +100,9 @@ local function loadExpConfig()
     DEDUPE_TTL_SECONDS = settingInt(config.Settings, "dedupe_ttl_seconds", DEDUPE_TTL_SECONDS)
     PREWARM_DELAY_MS = settingInt(config.Settings, "prewarm_delay_ms", PREWARM_DELAY_MS)
     NO_MATCH_LOG_LIMIT = settingInt(config.Settings, "no_match_log_limit", NO_MATCH_LOG_LIMIT)
+    CAP_LOG_LIMIT = settingInt(config.Settings, "cap_log_limit", CAP_LOG_LIMIT)
+    LEVEL_CAP = settingInt(config.Settings, "level_cap", LEVEL_CAP)
+    TALENT_POINTS_CAP = settingInt(config.Settings, "talent_points_cap", TALENT_POINTS_CAP)
 
     log(string.format(
         "Loaded %d EXP rules from %s.",
@@ -213,8 +223,40 @@ local function isTrue(value)
     return text == "true" or text == "1"
 end
 
+local function asNumber(value)
+    local raw = unwrap(value)
+    if type(raw) == "number" then
+        return math.floor(raw)
+    end
+
+    local number = tonumber(tostring(raw))
+    if number == nil then
+        return nil
+    end
+
+    return math.floor(number)
+end
+
+local function safeNumberCall(object, method)
+    local ok, result = safeCall(object, method)
+    if ok then
+        return asNumber(result)
+    end
+
+    return nil
+end
+
 local function safeStaticFind(path)
     local ok, object = pcall(StaticFindObject, path)
+    if ok and object ~= nil and isValid(object) then
+        return object
+    end
+
+    return nil
+end
+
+local function safeFindFirst(className)
+    local ok, object = pcall(FindFirstOf, className)
     if ok and object ~= nil and isValid(object) then
         return object
     end
@@ -394,6 +436,125 @@ local function currentScenarioComponent()
     return nil
 end
 
+local function currentProgressionObserver()
+    if isValid(cachedProgressionObserver) then
+        return cachedProgressionObserver
+    end
+
+    cachedProgressionObserver = safeFindFirst("R5SC_ProgressionObserver")
+    return cachedProgressionObserver
+end
+
+local function currentTalentTreeVM()
+    if isValid(cachedTalentTreeVM) then
+        return cachedTalentTreeVM
+    end
+
+    cachedTalentTreeVM = safeFindFirst("R5UITalentTreeVM")
+    return cachedTalentTreeVM
+end
+
+local function currentEntityProgressionVM()
+    if isValid(cachedEntityProgressionVM) then
+        return cachedEntityProgressionVM
+    end
+
+    local talentTreeVM = currentTalentTreeVM()
+    local okVM, vm = safeCall(talentTreeVM, "GetEntityProgressionVM")
+    if okVM and isValid(vm) then
+        cachedEntityProgressionVM = vm
+        return vm
+    end
+
+    cachedEntityProgressionVM = safeFindFirst("R5EntityProgressionVM")
+    return cachedEntityProgressionVM
+end
+
+local function currentPlayerLevel()
+    local observer = currentProgressionObserver()
+    local level = safeNumberCall(observer, "GetPlayerCurrentLevel")
+    if level ~= nil then
+        return level
+    end
+
+    local progressionVM = currentEntityProgressionVM()
+    return safeNumberCall(progressionVM, "GetCurrentLevel")
+end
+
+local function currentExpToNextLevel()
+    local progressionVM = currentEntityProgressionVM()
+    return safeNumberCall(progressionVM, "GetExpToNextLevel")
+end
+
+local function currentTalentPoints()
+    local talentTreeVM = currentTalentTreeVM()
+    local points = safeNumberCall(talentTreeVM, "GetAvailableTalentPoints")
+    if points ~= nil then
+        return points, "available"
+    end
+
+    points = safeNumberCall(talentTreeVM, "GetFreeTalentPoints")
+    if points ~= nil then
+        return points, "free"
+    end
+
+    return nil, nil
+end
+
+local function logCap(message)
+    capLogs = capLogs + 1
+    if capLogs <= CAP_LOG_LIMIT then
+        log(message)
+    end
+end
+
+local function adjustExpForCaps(amount, reason)
+    local adjustedAmount = amount
+
+    if LEVEL_CAP > 0 then
+        local currentLevel = currentPlayerLevel()
+        if currentLevel ~= nil then
+            if currentLevel >= LEVEL_CAP then
+                logCap(string.format(
+                    "EXP pominiety: level cap %d osiagniety (%d).",
+                    LEVEL_CAP,
+                    currentLevel
+                ))
+                return 0
+            end
+
+            if currentLevel == LEVEL_CAP - 1 then
+                local expToNext = currentExpToNextLevel()
+                if expToNext ~= nil and expToNext > 0 and adjustedAmount > expToNext then
+                    logCap(string.format(
+                        "EXP uciety do level cap %d: %d -> %d za %s.",
+                        LEVEL_CAP,
+                        adjustedAmount,
+                        expToNext,
+                        tostring(reason or "kill")
+                    ))
+                    adjustedAmount = expToNext
+                end
+            end
+        end
+    end
+
+    if TALENT_POINTS_CAP > 0 then
+        local talentPoints, pointsKind = currentTalentPoints()
+        if talentPoints ~= nil and talentPoints >= TALENT_POINTS_CAP then
+            logCap(string.format(
+                "EXP pominiety: talent cap %d osiagniety (%d %s).",
+                TALENT_POINTS_CAP,
+                talentPoints,
+                tostring(pointsKind or "points")
+            ))
+            return 0
+        end
+    end
+
+    return adjustedAmount
+end
+
 local function primaryWorldContext()
     local scenarioComponent = currentScenarioComponent()
     if isValid(scenarioComponent) then
@@ -551,6 +712,11 @@ local function awardExpForTarget(targetActor, sourceName)
         return false
     end
 
+    amount = adjustExpForCaps(amount, matchedPattern)
+    if amount == nil or amount <= 0 then
+        return false
+    end
+
     cleanAwardCache()
 
     local key = objectAddress(targetActor)
@@ -654,6 +820,9 @@ if type(ExecuteWithDelay) == "function" then
         ExecuteWithDelay(PREWARM_DELAY_MS, function()
             addExpTaskClass()
             primaryWorldContext()
+            currentProgressionObserver()
+            currentEntityProgressionVM()
+            currentTalentTreeVM()
         end)
     end)
 end
