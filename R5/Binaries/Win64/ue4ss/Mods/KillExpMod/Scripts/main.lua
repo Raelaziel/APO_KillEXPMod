@@ -23,12 +23,20 @@ local NO_MATCH_LOG_LIMIT = 5
 local CAP_LOG_LIMIT = 5
 local LEVEL_CAP = 100
 local TALENT_POINTS_CAP = 300
+local CAP_CACHE_WINDOW_MS = 5000
+local CAP_CACHE_WINDOW_FAR_MS = 30000
+local CAP_NEAR_LEVEL_MARGIN = 5
+local CAP_NEAR_TALENT_MARGIN = 15
+local SCENARIO_CONTEXT_RETRY_SECONDS = 5
 
 local EXP_BY_TARGET = {}
+local MATCH_RULES = {}
+local MATCH_RESULTS_BY_CLASS = {}
+local MATCH_RESULT_NONE = {}
 
 local unpackArgs = table.unpack or unpack
 local awardedKills = {}
-local awardEvents = 0
+local nextAwardCacheCleanupAt = 0
 local noMatchLogs = 0
 local capLogs = 0
 local cachedPlayerController = nil
@@ -39,6 +47,17 @@ local cachedAddExpTaskClass = nil
 local cachedProgressionObserver = nil
 local cachedEntityProgressionVM = nil
 local cachedTalentTreeVM = nil
+local cachedScenarioExecutor = nil
+local cachedScenarioGraph = nil
+local nextScenarioExecutorLookupAt = 0
+local nextScenarioGraphLookupAt = 0
+local cachedCapState = {
+    ExpiresAt = 0,
+    Level = nil,
+    ExpToNextLevel = nil,
+    TalentPoints = nil,
+    TalentPointsKind = nil,
+}
 
 local function log(message)
     print(string.format("[%s] %s\n", MOD_NAME, tostring(message)))
@@ -96,6 +115,18 @@ local function loadExpConfig()
     end
 
     EXP_BY_TARGET = config.Rules or {}
+    MATCH_RULES = {}
+    MATCH_RESULTS_BY_CLASS = {}
+    for _, rule in ipairs(EXP_BY_TARGET) do
+        if rule.Pattern ~= nil and rule.Pattern ~= "" then
+            MATCH_RULES[#MATCH_RULES + 1] = {
+                Exp = rule.Exp,
+                Pattern = rule.Pattern,
+                PatternLower = string.lower(rule.Pattern),
+            }
+        end
+    end
+
     HIDE_EXP_NOTIFICATION = settingBool(config.Settings, "hide_exp_notification", HIDE_EXP_NOTIFICATION)
     DEDUPE_TTL_SECONDS = settingInt(config.Settings, "dedupe_ttl_seconds", DEDUPE_TTL_SECONDS)
     PREWARM_DELAY_MS = settingInt(config.Settings, "prewarm_delay_ms", PREWARM_DELAY_MS)
@@ -103,6 +134,10 @@ local function loadExpConfig()
     CAP_LOG_LIMIT = settingInt(config.Settings, "cap_log_limit", CAP_LOG_LIMIT)
     LEVEL_CAP = settingInt(config.Settings, "level_cap", LEVEL_CAP)
     TALENT_POINTS_CAP = settingInt(config.Settings, "talent_points_cap", TALENT_POINTS_CAP)
+    CAP_CACHE_WINDOW_MS = settingInt(config.Settings, "cap_cache_window_ms", CAP_CACHE_WINDOW_MS)
+    CAP_CACHE_WINDOW_FAR_MS = settingInt(config.Settings, "cap_cache_window_far_ms", CAP_CACHE_WINDOW_FAR_MS)
+    CAP_NEAR_LEVEL_MARGIN = settingInt(config.Settings, "cap_near_level_margin", CAP_NEAR_LEVEL_MARGIN)
+    CAP_NEAR_TALENT_MARGIN = settingInt(config.Settings, "cap_near_talent_margin", CAP_NEAR_TALENT_MARGIN)
 
     log(string.format(
         "Loaded %d EXP rules from %s.",
@@ -264,9 +299,26 @@ local function safeFindFirst(className)
     return nil
 end
 
-local function objectAddress(object)
-    local raw = unwrap(object)
-    if raw == nil or not isValid(raw) then
+local function safeRawCall(raw, method)
+    if raw == nil then
+        return false, nil
+    end
+
+    local okFn, fn = pcall(function()
+        return raw[method]
+    end)
+
+    if not okFn or fn == nil then
+        return false, nil
+    end
+
+    return pcall(function()
+        return fn(raw)
+    end)
+end
+
+local function rawObjectAddress(raw)
+    if raw == nil then
         return nil
     end
 
@@ -279,6 +331,15 @@ local function objectAddress(object)
     end
 
     return nil
+end
+
+local function objectAddress(object)
+    local raw = unwrap(object)
+    if raw == nil or not isValid(raw) then
+        return nil
+    end
+
+    return rawObjectAddress(raw)
 end
 
 local function appendObjectText(parts, object, callback)
@@ -323,21 +384,101 @@ local function objectText(object)
     return table.concat(parts, " ")
 end
 
+local function targetMatchText(targetActor)
+    local raw = unwrap(targetActor)
+    if raw == nil or not isValid(raw) then
+        return nil, nil
+    end
+
+    local okClass, classObject = safeRawCall(raw, "GetClass")
+    local classKey = nil
+
+    local className = ""
+    local classFullName = ""
+
+    if okClass and isValid(classObject) then
+        classKey = rawObjectAddress(classObject)
+
+        local okClassName, classNameValue = safeRawCall(classObject, "GetName")
+        if okClassName and classNameValue ~= nil then
+            className = tostring(classNameValue)
+        end
+
+        local okClassFullName, classFullNameValue = safeRawCall(classObject, "GetFullName")
+        if okClassFullName and classFullNameValue ~= nil then
+            classFullName = tostring(classFullNameValue)
+        end
+    end
+
+    if classKey == nil or classKey == "" then
+        if classFullName ~= "" then
+            classKey = classFullName
+        elseif className ~= "" then
+            classKey = className
+        end
+    end
+
+    if className == "" and classFullName == "" then
+        local actorName = ""
+        local okActorName, actorNameValue = safeRawCall(raw, "GetName")
+        if okActorName and actorNameValue ~= nil then
+            actorName = tostring(actorNameValue)
+        end
+
+        local actorFullName = ""
+        local okActorFullName, actorFullNameValue = safeRawCall(raw, "GetFullName")
+        if okActorFullName and actorFullNameValue ~= nil then
+            actorFullName = tostring(actorFullNameValue)
+        end
+
+        if actorName == "" and actorFullName == "" then
+            return classKey, nil
+        end
+
+        return classKey, string.lower(table.concat({
+            actorName,
+            actorFullName,
+        }, " "))
+    end
+
+    return classKey, string.lower(table.concat({
+        className,
+        classFullName,
+    }, " "))
+end
+
 local function expForTarget(targetActor)
     if not isValid(targetActor) then
         return nil, nil
     end
 
-    local text = objectText(targetActor)
-    if text == "" then
+    local classKey, text = targetMatchText(targetActor)
+    if classKey ~= nil and classKey ~= "" then
+        local cachedRule = MATCH_RESULTS_BY_CLASS[classKey]
+        if cachedRule == MATCH_RESULT_NONE then
+            return nil, nil
+        end
+
+        if cachedRule ~= nil then
+            return cachedRule.Exp, cachedRule.Pattern
+        end
+    end
+
+    if text == nil or text == "" then
         return nil, nil
     end
 
-    local lowerText = string.lower(text)
-    for _, rule in ipairs(EXP_BY_TARGET) do
-        if string.find(lowerText, string.lower(rule.Pattern), 1, true) ~= nil then
+    for _, rule in ipairs(MATCH_RULES) do
+        if string.find(text, rule.PatternLower, 1, true) ~= nil then
+            if classKey ~= nil and classKey ~= "" then
+                MATCH_RESULTS_BY_CLASS[classKey] = rule
+            end
             return rule.Exp, rule.Pattern
         end
+    end
+
+    if classKey ~= nil and classKey ~= "" then
+        MATCH_RESULTS_BY_CLASS[classKey] = MATCH_RESULT_NONE
     end
 
     return nil, nil
@@ -470,6 +611,135 @@ local function currentEntityProgressionVM()
     return cachedEntityProgressionVM
 end
 
+local function firstValidProperty(object, names)
+    for _, name in ipairs(names) do
+        local value = safeRead(object, name)
+        if isValid(value) then
+            return value, name
+        end
+    end
+
+    return nil, nil
+end
+
+local function firstValidMethodResult(object, methods)
+    for _, method in ipairs(methods) do
+        local ok, value = safeCall(object, method)
+        if ok and isValid(value) then
+            return value, method
+        end
+    end
+
+    return nil, nil
+end
+
+local function currentScenarioExecutor()
+    if isValid(cachedScenarioExecutor) then
+        return cachedScenarioExecutor
+    end
+
+    local now = os.time()
+    if now < nextScenarioExecutorLookupAt then
+        return nil
+    end
+
+    nextScenarioExecutorLookupAt = now + SCENARIO_CONTEXT_RETRY_SECONDS
+
+    local scenarioComponent = currentScenarioComponent()
+    local executor = nil
+
+    executor = select(1, firstValidProperty(scenarioComponent, {
+        "Executor",
+        "ScenarioExecutor",
+        "NodeExecutor",
+        "CurrentExecutor",
+    }))
+
+    if not isValid(executor) then
+        executor = select(1, firstValidMethodResult(scenarioComponent, {
+            "GetExecutor",
+            "GetScenarioExecutor",
+            "GetNodeExecutor",
+            "GetCurrentExecutor",
+        }))
+    end
+
+    if isValid(executor) then
+        cachedScenarioExecutor = executor
+        nextScenarioExecutorLookupAt = 0
+        return executor
+    end
+
+    return nil
+end
+
+local function currentScenarioGraph()
+    if isValid(cachedScenarioGraph) then
+        return cachedScenarioGraph
+    end
+
+    local now = os.time()
+    if now < nextScenarioGraphLookupAt then
+        return nil
+    end
+
+    nextScenarioGraphLookupAt = now + SCENARIO_CONTEXT_RETRY_SECONDS
+
+    local scenarioComponent = currentScenarioComponent()
+    local graph = nil
+
+    graph = select(1, firstValidProperty(scenarioComponent, {
+        "BaseGraph",
+        "Graph",
+        "ScenarioGraph",
+        "CurrentGraph",
+        "OwningGraph",
+    }))
+
+    if not isValid(graph) then
+        graph = select(1, firstValidMethodResult(scenarioComponent, {
+            "GetBaseGraph",
+            "GetGraph",
+            "GetScenarioGraph",
+            "GetCurrentGraph",
+            "GetOwningGraph",
+        }))
+    end
+
+    if isValid(graph) then
+        cachedScenarioGraph = graph
+        nextScenarioGraphLookupAt = 0
+        return graph
+    end
+
+    local executor = currentScenarioExecutor()
+    graph = select(1, firstValidProperty(executor, {
+        "BaseGraph",
+        "Graph",
+        "ScenarioGraph",
+        "CurrentGraph",
+        "OwningGraph",
+    }))
+
+    if not isValid(graph) then
+        graph = select(1, firstValidMethodResult(executor, {
+            "GetBaseGraph",
+            "GetGraph",
+            "GetScenarioGraph",
+            "GetCurrentGraph",
+            "GetOwningGraph",
+        }))
+    end
+
+    if isValid(graph) then
+        cachedScenarioGraph = graph
+        nextScenarioGraphLookupAt = 0
+        return graph
+    end
+
+    return nil
+end
+
 local function currentPlayerLevel()
     local observer = currentProgressionObserver()
     local level = safeNumberCall(observer, "GetPlayerCurrentLevel")
@@ -501,6 +771,25 @@ local function currentTalentPoints()
     return nil, nil
 end
 
+local function capWindowForState(level, talentPoints)
+    local levelIsNearCap = false
+    local talentIsNearCap = false
+
+    if LEVEL_CAP > 0 and level ~= nil then
+        levelIsNearCap = level >= (LEVEL_CAP - CAP_NEAR_LEVEL_MARGIN)
+    end
+
+    if TALENT_POINTS_CAP > 0 and talentPoints ~= nil then
+        talentIsNearCap = talentPoints >= (TALENT_POINTS_CAP - CAP_NEAR_TALENT_MARGIN)
+    end
+
+    if levelIsNearCap or talentIsNearCap then
+        return CAP_CACHE_WINDOW_MS
+    end
+
+    return CAP_CACHE_WINDOW_FAR_MS
+end
+
 local function logCap(message)
     capLogs = capLogs + 1
     if capLogs <= CAP_LOG_LIMIT then
@@ -508,11 +797,47 @@ local function logCap(message)
     end
 end
 
+local function currentCapState()
+    local nowSeconds = os.time()
+    if nowSeconds < cachedCapState.ExpiresAt then
+        return cachedCapState
+    end
+
+    local level = nil
+    local expToNextLevel = nil
+    if LEVEL_CAP > 0 then
+        level = currentPlayerLevel()
+        if level ~= nil and level == LEVEL_CAP - 1 then
+            expToNextLevel = currentExpToNextLevel()
+        end
+    end
+
+    local talentPoints = nil
+    local talentPointsKind = nil
+    if TALENT_POINTS_CAP > 0 then
+        talentPoints, talentPointsKind = currentTalentPoints()
+    end
+
+    local cacheWindowMs = capWindowForState(level, talentPoints)
+    local expiresAt = nowSeconds + math.max(1, math.floor(cacheWindowMs / 1000))
+
+    cachedCapState = {
+        ExpiresAt = expiresAt,
+        Level = level,
+        ExpToNextLevel = expToNextLevel,
+        TalentPoints = talentPoints,
+        TalentPointsKind = talentPointsKind,
+    }
+
+    return cachedCapState
+end
+
 local function adjustExpForCaps(amount, reason)
     local adjustedAmount = amount
+    local capState = currentCapState()
 
     if LEVEL_CAP > 0 then
-        local currentLevel = currentPlayerLevel()
+        local currentLevel = capState.Level
         if currentLevel ~= nil then
             if currentLevel >= LEVEL_CAP then
                 logCap(string.format(
@@ -524,7 +849,7 @@ local function adjustExpForCaps(amount, reason)
             end
 
             if currentLevel == LEVEL_CAP - 1 then
-                local expToNext = currentExpToNextLevel()
+                local expToNext = capState.ExpToNextLevel
                 if expToNext ~= nil and expToNext > 0 and adjustedAmount > expToNext then
                     logCap(string.format(
                         "EXP uciety do level cap %d: %d -> %d za %s.",
@@ -540,7 +865,8 @@ local function adjustExpForCaps(amount, reason)
     end
 
     if TALENT_POINTS_CAP > 0 then
-        local talentPoints, pointsKind = currentTalentPoints()
+        local talentPoints = capState.TalentPoints
+        local pointsKind = capState.TalentPointsKind
         if talentPoints ~= nil and talentPoints >= TALENT_POINTS_CAP then
             logCap(string.format(
                 "EXP pominiety: talent cap %d osiagniety (%d %s).",
@@ -629,6 +955,68 @@ local function setTaskExp(task, amount)
     return true
 end
 
+local function setTaskField(task, field, value)
+    if not isValid(task) or not isValid(value) then
+        return false
+    end
+
+    local ok = pcall(function()
+        task[field] = value
+    end)
+
+    return ok
+end
+
+local function prepareScenarioTask(task)
+    local scenarioGraph = currentScenarioGraph()
+    local scenarioExecutor = currentScenarioExecutor()
+
+    local taskGraph = safeRead(task, "BaseGraph")
+    if not isValid(taskGraph) and isValid(scenarioGraph) then
+        setTaskField(task, "BaseGraph", scenarioGraph)
+        setTaskField(task, "Graph", scenarioGraph)
+        setTaskField(task, "OwningGraph", scenarioGraph)
+    end
+
+    local taskExecutor = safeRead(task, "Executor")
+    if not isValid(taskExecutor) and isValid(scenarioExecutor) then
+        setTaskField(task, "Executor", scenarioExecutor)
+        setTaskField(task, "NodeExecutor", scenarioExecutor)
+        setTaskField(task, "ScenarioExecutor", scenarioExecutor)
+        setTaskField(task, "CurrentExecutor", scenarioExecutor)
+    end
+
+    return isValid(safeRead(task, "BaseGraph")) or isValid(safeRead(task, "Graph")),
+        isValid(safeRead(task, "Executor")) or isValid(safeRead(task, "NodeExecutor"))
+end
+
+local function targetAwardKey(targetActor)
+    local key = objectAddress(targetActor)
+    if key ~= nil and key ~= "" then
+        return key
+    end
+
+    return objectText(targetActor)
+end
+
+local function isAwardKeyActive(key, now)
+    if key == nil or key == "" then
+        return false
+    end
+
+    local awardedAt = awardedKills[key]
+    if awardedAt == nil then
+        return false
+    end
+
+    if now - awardedAt > DEDUPE_TTL_SECONDS then
+        awardedKills[key] = nil
+        return false
+    end
+
+    return true
+end
+
 local function grantExpThroughScenarioTask(amount, reason)
     local worldContext = primaryWorldContext()
     if not isValid(worldContext) then
@@ -666,6 +1054,8 @@ local function grantExpThroughScenarioTask(amount, reason)
         end)
     end
 
+    prepareScenarioTask(task)
+
     safeCall(task, "OnNodeCreated")
 
     local okInit, initErr = safeCall(task, "OnInit")
@@ -684,13 +1074,12 @@ local function grantExpThroughScenarioTask(amount, reason)
     return true
 end
 
-local function cleanAwardCache()
-    awardEvents = awardEvents + 1
-    if awardEvents % 10 ~= 0 then
+local function cleanAwardCache(now)
+    if now < nextAwardCacheCleanupAt then
         return
     end
 
-    local now = os.time()
+    nextAwardCacheCleanupAt = now + DEDUPE_TTL_SECONDS
     for key, timestamp in pairs(awardedKills) do
         if now - timestamp > DEDUPE_TTL_SECONDS then
             awardedKills[key] = nil
@@ -700,6 +1089,12 @@ end
 
 local function awardExpForTarget(targetActor, sourceName)
     if not isValid(targetActor) then
+        return false
+    end
+
+    local now = os.time()
+    local key = objectAddress(targetActor)
+    if isAwardKeyActive(key, now) then
         return false
     end
 
@@ -717,19 +1112,18 @@ local function awardExpForTarget(targetActor, sourceName)
         return false
     end
 
-    cleanAwardCache()
+    cleanAwardCache(now)
 
-    local key = objectAddress(targetActor)
     if key == nil then
-        key = objectText(targetActor)
+        key = targetAwardKey(targetActor)
     end
 
-    if key ~= nil and key ~= "" and awardedKills[key] ~= nil then
+    if isAwardKeyActive(key, now) then
         return false
     end
 
     if key ~= nil and key ~= "" then
-        awardedKills[key] = os.time()
+        awardedKills[key] = now
     end
 
     local ok, result = pcall(function()
@@ -823,13 +1217,17 @@ if type(ExecuteWithDelay) == "function" then
             currentProgressionObserver()
             currentEntityProgressionVM()
             currentTalentTreeVM()
+            currentScenarioExecutor()
+            currentScenarioGraph()
+            currentCapState()
         end)
     end)
 end
 
-registerHookSafe("/Script/R5.R5DamageUIComponent:OnASCDamageDealt", function(context, targetActor, incomingDamage, dealtDamage, armorReduction, isKillDamage, effectSpec)
-    handleKillDamage(targetActor, isKillDamage, "DamageUI")
-end)
+registerHookSafe("/Script/R5.R5DamageUIComponent:OnASCDamageDealt",
+    function(context, targetActor, incomingDamage, dealtDamage, armorReduction, isKillDamage, effectSpec)
+        handleKillDamage(targetActor, isKillDamage, "DamageUI")
+    end)
 
 registerHookSafe("/Script/R5.R5DamageUIComponent:ClientDamageDealt", function(context, damageInstance)
     handleDamageInstance(damageInstance, "ClientDamageDealt")

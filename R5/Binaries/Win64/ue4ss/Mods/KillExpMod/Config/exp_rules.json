@@ -8,7 +8,11 @@
     "no_match_log_limit": 5,
     "cap_log_limit": 5,
     "level_cap": 100,
-    "talent_points_cap": 300
+    "talent_points_cap": 300,
+    "cap_cache_window_ms": 5000,
+    "cap_cache_window_far_ms": 30000,
+    "cap_near_level_margin": 5,
+    "cap_near_talent_margin": 15
   },
   "rules": [
     { "group": "Friendly and player-owned actors", "pattern": "BP_Mob_Boar_FriendLvl2_C", "exp": 0, "note": "Friendly boar" },
