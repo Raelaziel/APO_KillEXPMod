@@ -14,9 +14,22 @@ local CONFIG_PATHS = {
     "ue4ss/Mods/KillExpMod/Config/exp_rules.json",
 }
 
+local LOCALIZATION_PATHS = {
+    "Mods/KillExpMod/Config/log_localization.lua",
+    "ue4ss/Mods/KillExpMod/Config/log_localization.lua",
+}
+
 local MOD_NAME = "KillExpMod"
-local MOD_BUILD = "2026-04-19-caps-config"
+local MOD_BUILD = "2026-04-24-i18n-summary-hooks"
+local LOG_LANGUAGE = "en"
 local HIDE_EXP_NOTIFICATION = false
+local DIAGNOSTIC_LOGGING = false
+local VERBOSE_COMBAT_DIAGNOSTICS = false
+local DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS = 0
+local ENABLE_HOOK_DAMAGE_UI = true
+local ENABLE_HOOK_CLIENT_DAMAGE_DEALT = true
+local ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT = true
+local ENABLE_HOOK_DEATH_COMPONENT = true
 local DEDUPE_TTL_SECONDS = 30
 local PREWARM_DELAY_MS = 2000
 local NO_MATCH_LOG_LIMIT = 5
@@ -39,6 +52,16 @@ local awardedKills = {}
 local nextAwardCacheCleanupAt = 0
 local noMatchLogs = 0
 local capLogs = 0
+local diagnosticStats = {
+    KillEvents = 0,
+    NonKillEvents = 0,
+    GrantAttempts = 0,
+    Granted = 0,
+    Duplicates = 0,
+    CapBlocked = 0,
+    Errors = 0,
+}
+local nextDiagnosticSummaryAt = 0
 local cachedPlayerController = nil
 local cachedPlayerCharacter = nil
 local cachedPlayerState = nil
@@ -63,6 +86,94 @@ local function log(message)
     print(string.format("[%s] %s\n", MOD_NAME, tostring(message)))
 end
 
+local LOG_TEXT = {
+    en = {
+        unknown = "unknown",
+    },
+    pl = {
+        unknown = "nieznany",
+    },
+}
+
+local function loc(key, ...)
+    local langTable = LOG_TEXT[LOG_LANGUAGE] or LOG_TEXT.pl
+    local fallbackTable = LOG_TEXT.pl
+    local template = langTable[key] or fallbackTable[key] or tostring(key)
+
+    if select("#", ...) > 0 then
+        return string.format(template, ...)
+    end
+
+    return template
+end
+
+local function resolveDiagnosticMessage(message)
+    if type(message) == "function" then
+        local ok, built = pcall(message)
+        if ok then
+            return built
+        end
+
+        return "diag builder error: " .. tostring(built)
+    end
+
+    return message
+end
+
+local function diagnosticLog(message)
+    if not DIAGNOSTIC_LOGGING then
+        return
+    end
+
+    log("[diag] " .. tostring(resolveDiagnosticMessage(message)))
+end
+
+local function diagnosticCombatLog(message)
+    if not DIAGNOSTIC_LOGGING or not VERBOSE_COMBAT_DIAGNOSTICS then
+        return
+    end
+
+    log("[diag] " .. tostring(resolveDiagnosticMessage(message)))
+end
+
+local function bumpDiagnosticStat(statKey)
+    local value = diagnosticStats[statKey]
+    if value == nil then
+        return
+    end
+
+    diagnosticStats[statKey] = value + 1
+end
+
+local function maybeLogDiagnosticSummary(nowSeconds)
+    if not DIAGNOSTIC_LOGGING or DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS <= 0 then
+        return
+    end
+
+    if nextDiagnosticSummaryAt == 0 then
+        nextDiagnosticSummaryAt = nowSeconds + DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS
+        return
+    end
+
+    if nowSeconds < nextDiagnosticSummaryAt then
+        return
+    end
+
+    nextDiagnosticSummaryAt = nowSeconds + DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS
+    diagnosticLog(function()
+        return loc(
+            "diag_summary",
+            diagnosticStats.KillEvents,
+            diagnosticStats.NonKillEvents,
+            diagnosticStats.GrantAttempts,
+            diagnosticStats.Granted,
+            diagnosticStats.Duplicates,
+            diagnosticStats.CapBlocked,
+            diagnosticStats.Errors
+        )
+    end)
+end
+
 local function loadScriptFromPaths(paths)
     local lastError = nil
 
@@ -76,6 +187,17 @@ local function loadScriptFromPaths(paths)
     end
 
     return nil, tostring(lastError)
+end
+
+local function loadLocalizationTable()
+    local moduleOrNil, modulePathOrErr = loadScriptFromPaths(LOCALIZATION_PATHS)
+    if type(moduleOrNil) == "table" then
+        LOG_TEXT = moduleOrNil
+        return true
+    end
+
+    log("Localization table was not loaded, using minimal fallback: " .. tostring(modulePathOrErr))
+    return false
 end
 
 local function settingBool(settings, key, fallback)
@@ -101,17 +223,35 @@ local function settingInt(settings, key, fallback)
     return math.floor(value)
 end
 
+local function settingString(settings, key, fallback)
+    local value = settings[key]
+    if value == nil then
+        return fallback
+    end
+
+    return tostring(value)
+end
+
 local function loadExpConfig()
+    loadLocalizationTable()
+
     local loader, loaderPath = loadScriptFromPaths(CONFIG_LOADER_PATHS)
     if loader == nil or type(loader.load) ~= "function" then
-        log("EXP config loader was not found: " .. tostring(loaderPath))
+        log(loc("config_loader_missing", tostring(loaderPath)))
         return
     end
 
     local config, errorMessage = loader.load(CONFIG_PATHS)
     if config == nil then
-        log("EXP config was not loaded: " .. tostring(errorMessage))
+        log(loc("config_load_failed", tostring(errorMessage)))
         return
+    end
+
+    local configuredLanguage = string.lower(settingString(config.Settings, "log_language", LOG_LANGUAGE))
+    if LOG_TEXT[configuredLanguage] ~= nil then
+        LOG_LANGUAGE = configuredLanguage
+    else
+        LOG_LANGUAGE = "en"
     end
 
     EXP_BY_TARGET = config.Rules or {}
@@ -128,6 +268,13 @@ local function loadExpConfig()
     end
 
     HIDE_EXP_NOTIFICATION = settingBool(config.Settings, "hide_exp_notification", HIDE_EXP_NOTIFICATION)
+    DIAGNOSTIC_LOGGING = settingBool(config.Settings, "diagnostic_logging", DIAGNOSTIC_LOGGING)
+    VERBOSE_COMBAT_DIAGNOSTICS = settingBool(config.Settings, "verbose_combat_diagnostics", VERBOSE_COMBAT_DIAGNOSTICS)
+    DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS = settingInt(config.Settings, "diagnostic_summary_interval_seconds", DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS)
+    ENABLE_HOOK_DAMAGE_UI = settingBool(config.Settings, "enable_hook_damage_ui", ENABLE_HOOK_DAMAGE_UI)
+    ENABLE_HOOK_CLIENT_DAMAGE_DEALT = settingBool(config.Settings, "enable_hook_client_damage_dealt", ENABLE_HOOK_CLIENT_DAMAGE_DEALT)
+    ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT = settingBool(config.Settings, "enable_hook_net_multicast_damage_dealt", ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT)
+    ENABLE_HOOK_DEATH_COMPONENT = settingBool(config.Settings, "enable_hook_death_component", ENABLE_HOOK_DEATH_COMPONENT)
     DEDUPE_TTL_SECONDS = settingInt(config.Settings, "dedupe_ttl_seconds", DEDUPE_TTL_SECONDS)
     PREWARM_DELAY_MS = settingInt(config.Settings, "prewarm_delay_ms", PREWARM_DELAY_MS)
     NO_MATCH_LOG_LIMIT = settingInt(config.Settings, "no_match_log_limit", NO_MATCH_LOG_LIMIT)
@@ -139,14 +286,21 @@ local function loadExpConfig()
     CAP_NEAR_LEVEL_MARGIN = settingInt(config.Settings, "cap_near_level_margin", CAP_NEAR_LEVEL_MARGIN)
     CAP_NEAR_TALENT_MARGIN = settingInt(config.Settings, "cap_near_talent_margin", CAP_NEAR_TALENT_MARGIN)
 
-    log(string.format(
-        "Loaded %d EXP rules from %s.",
-        #EXP_BY_TARGET,
-        tostring(config.Path)
+    log(loc("rules_loaded", #EXP_BY_TARGET, tostring(config.Path)))
+
+    diagnosticLog(loc("diag_enabled"))
+    diagnosticLog(loc(
+        "combat_diag_state",
+        VERBOSE_COMBAT_DIAGNOSTICS and loc("state_enabled") or loc("state_disabled")
+    ))
+    diagnosticLog(loc(
+        "summary_diag_state",
+        DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS,
+        DIAGNOSTIC_SUMMARY_INTERVAL_SECONDS > 0 and loc("state_enabled") or loc("state_disabled")
     ))
 
     for _, warning in ipairs(config.Warnings or {}) do
-        log("Config warning: " .. tostring(warning))
+        log(loc("config_warning", tostring(warning)))
     end
 end
 
@@ -342,6 +496,71 @@ local function objectAddress(object)
     return rawObjectAddress(raw)
 end
 
+local function sameObject(left, right)
+    local leftAddress = objectAddress(left)
+    local rightAddress = objectAddress(right)
+
+    if leftAddress ~= nil and rightAddress ~= nil then
+        return leftAddress == rightAddress
+    end
+
+    return unwrap(left) == unwrap(right)
+end
+
+local function resetScenarioRuntimeCache(reason)
+    cachedScenarioComponent = nil
+    cachedScenarioExecutor = nil
+    cachedScenarioGraph = nil
+    nextScenarioExecutorLookupAt = 0
+    nextScenarioGraphLookupAt = 0
+
+    if reason ~= nil then
+        diagnosticLog(loc("cache_refresh_scenario", tostring(reason)))
+    end
+end
+
+local function resetPlayerRuntimeCache(reason)
+    cachedPlayerCharacter = nil
+    cachedPlayerState = nil
+    cachedProgressionObserver = nil
+    cachedEntityProgressionVM = nil
+    cachedTalentTreeVM = nil
+    cachedCapState = {
+        ExpiresAt = 0,
+        Level = nil,
+        ExpToNextLevel = nil,
+        TalentPoints = nil,
+        TalentPointsKind = nil,
+    }
+
+    resetScenarioRuntimeCache(reason)
+
+    if reason ~= nil then
+        diagnosticLog(loc("cache_refresh_player", tostring(reason)))
+    end
+end
+
+local objectText
+
+local function objectDebugName(object)
+    local address = objectAddress(object)
+    local text = objectText(object)
+
+    if address ~= nil and text ~= nil and text ~= "" then
+        return tostring(text) .. " @" .. tostring(address)
+    end
+
+    if text ~= nil and text ~= "" then
+        return tostring(text)
+    end
+
+    if address ~= nil and address ~= "" then
+        return "@" .. tostring(address)
+    end
+
+    return "<nil>"
+end
+
 local function appendObjectText(parts, object, callback)
     local raw = unwrap(object)
     if raw == nil or not isValid(raw) then
@@ -354,7 +573,7 @@ local function appendObjectText(parts, object, callback)
     end
 end
 
-local function objectText(object)
+objectText = function(object)
     local parts = {}
 
     appendObjectText(parts, object, function(raw)
@@ -513,65 +732,112 @@ local function currentPlayerController()
 end
 
 local function currentPlayerCharacter()
+    local controller = currentPlayerController()
+    local freshCharacter = nil
+
+    if isValid(controller) then
+        local liveController = unwrap(controller)
+        local okCharacter = false
+        local character = nil
+
+        if liveController ~= nil then
+            okCharacter, character = pcall(function()
+                return liveController:GetR5PlayerCharacter()
+            end)
+        end
+
+        if okCharacter and isValid(character) then
+            freshCharacter = character
+        else
+            character = safeRead(controller, "Pawn")
+            if isValid(character) then
+                freshCharacter = character
+            end
+        end
+    end
+
+    if isValid(freshCharacter) then
+        if isValid(cachedPlayerCharacter) and not sameObject(cachedPlayerCharacter, freshCharacter) then
+            diagnosticLog(function()
+                return loc(
+                    "pawn_changed",
+                    objectDebugName(cachedPlayerCharacter),
+                    objectDebugName(freshCharacter)
+                )
+            end)
+            resetPlayerRuntimeCache(loc("reason_new_pawn"))
+        end
+
+        cachedPlayerCharacter = freshCharacter
+        return freshCharacter
+    end
+
     if isValid(cachedPlayerCharacter) then
         return cachedPlayerCharacter
-    end
-
-    local controller = currentPlayerController()
-    if not isValid(controller) then
-        return nil
-    end
-
-    local okCharacter, character = pcall(function()
-        return controller:GetR5PlayerCharacter()
-    end)
-
-    if okCharacter and isValid(character) then
-        cachedPlayerCharacter = character
-        return character
-    end
-
-    character = safeRead(controller, "Pawn")
-    if isValid(character) then
-        cachedPlayerCharacter = character
-        return character
     end
 
     return nil
 end
 
 local function currentPlayerState()
-    if isValid(cachedPlayerState) then
-        return cachedPlayerState
-    end
-
     local controller = currentPlayerController()
+    local freshState = nil
+
     local playerState = safeRead(controller, "PlayerState")
     if isValid(playerState) then
-        cachedPlayerState = playerState
-        return playerState
+        freshState = playerState
+    else
+        local character = currentPlayerCharacter()
+        local okState, state = safeCall(character, "GetR5PlayerState")
+        if okState and isValid(state) then
+            freshState = state
+        end
     end
 
-    local character = currentPlayerCharacter()
-    local okState, state = safeCall(character, "GetR5PlayerState")
-    if okState and isValid(state) then
-        cachedPlayerState = state
-        return state
+    if isValid(freshState) then
+        if isValid(cachedPlayerState) and not sameObject(cachedPlayerState, freshState) then
+            diagnosticLog(function()
+                return loc(
+                    "player_state_changed",
+                    objectDebugName(cachedPlayerState),
+                    objectDebugName(freshState)
+                )
+            end)
+            resetPlayerRuntimeCache(loc("reason_new_player_state"))
+        end
+
+        cachedPlayerState = freshState
+        return freshState
+    end
+
+    if isValid(cachedPlayerState) then
+        return cachedPlayerState
     end
 
     return nil
 end
 
 local function currentScenarioComponent()
-    if isValid(cachedScenarioComponent) then
-        return cachedScenarioComponent
-    end
-
     local playerState = currentPlayerState()
     local component = safeRead(playerState, "ScenarioComponent")
     if isValid(component) then
+        if isValid(cachedScenarioComponent) and not sameObject(cachedScenarioComponent, component) then
+            diagnosticLog(function()
+                return loc(
+                    "scenario_component_changed",
+                    objectDebugName(cachedScenarioComponent),
+                    objectDebugName(component)
+                )
+            end)
+            resetScenarioRuntimeCache(loc("reason_new_scenario_component"))
+        end
+
         cachedScenarioComponent = component
         return component
+    end
+
+    if isValid(cachedScenarioComponent) then
+        return cachedScenarioComponent
     end
 
     return nil
@@ -634,6 +900,43 @@ local function firstValidMethodResult(object, methods)
 end
 
 local function currentScenarioExecutor()
+    local scenarioComponent = currentScenarioComponent()
+    if isValid(scenarioComponent) then
+        local freshExecutor = select(1, firstValidProperty(scenarioComponent, {
+            "Executor",
+            "ScenarioExecutor",
+            "NodeExecutor",
+            "CurrentExecutor",
+        }))
+
+        if not isValid(freshExecutor) then
+            freshExecutor = select(1, firstValidMethodResult(scenarioComponent, {
+                "GetExecutor",
+                "GetScenarioExecutor",
+                "GetNodeExecutor",
+                "GetCurrentExecutor",
+            }))
+        end
+
+        if isValid(freshExecutor) then
+            if isValid(cachedScenarioExecutor) and not sameObject(cachedScenarioExecutor, freshExecutor) then
+                diagnosticLog(function()
+                    return loc(
+                        "scenario_executor_changed",
+                        objectDebugName(cachedScenarioExecutor),
+                        objectDebugName(freshExecutor)
+                    )
+                end)
+                cachedScenarioGraph = nil
+                nextScenarioGraphLookupAt = 0
+            end
+
+            cachedScenarioExecutor = freshExecutor
+            nextScenarioExecutorLookupAt = 0
+            return freshExecutor
+        end
+    end
+
     if isValid(cachedScenarioExecutor) then
         return cachedScenarioExecutor
     end
@@ -645,7 +948,6 @@ local function currentScenarioExecutor()
 
     nextScenarioExecutorLookupAt = now + SCENARIO_CONTEXT_RETRY_SECONDS
 
-    local scenarioComponent = currentScenarioComponent()
     local executor = nil
 
     executor = select(1, firstValidProperty(scenarioComponent, {
@@ -674,6 +976,43 @@ local function currentScenarioExecutor()
 end
 
 local function currentScenarioGraph()
+    local scenarioComponent = currentScenarioComponent()
+    if isValid(scenarioComponent) then
+        local freshGraph = select(1, firstValidProperty(scenarioComponent, {
+            "BaseGraph",
+            "Graph",
+            "ScenarioGraph",
+            "CurrentGraph",
+            "OwningGraph",
+        }))
+
+        if not isValid(freshGraph) then
+            freshGraph = select(1, firstValidMethodResult(scenarioComponent, {
+                "GetBaseGraph",
+                "GetGraph",
+                "GetScenarioGraph",
+                "GetCurrentGraph",
+                "GetOwningGraph",
+            }))
+        end
+
+        if isValid(freshGraph) then
+            if isValid(cachedScenarioGraph) and not sameObject(cachedScenarioGraph, freshGraph) then
+                diagnosticLog(function()
+                    return loc(
+                        "scenario_graph_changed",
+                        objectDebugName(cachedScenarioGraph),
+                        objectDebugName(freshGraph)
+                    )
+                end)
+            end
+
+            cachedScenarioGraph = freshGraph
+            nextScenarioGraphLookupAt = 0
+            return freshGraph
+        end
+    end
+
     if isValid(cachedScenarioGraph) then
         return cachedScenarioGraph
     end
@@ -685,7 +1024,6 @@ local function currentScenarioGraph()
 
     nextScenarioGraphLookupAt = now + SCENARIO_CONTEXT_RETRY_SECONDS
 
-    local scenarioComponent = currentScenarioComponent()
     local graph = nil
 
     graph = select(1, firstValidProperty(scenarioComponent, {
@@ -840,23 +1178,19 @@ local function adjustExpForCaps(amount, reason)
         local currentLevel = capState.Level
         if currentLevel ~= nil then
             if currentLevel >= LEVEL_CAP then
-                logCap(string.format(
-                    "EXP pominiety: level cap %d osiagniety (%d).",
-                    LEVEL_CAP,
-                    currentLevel
-                ))
+                logCap(loc("cap_level_reached", LEVEL_CAP, currentLevel))
                 return 0
             end
 
             if currentLevel == LEVEL_CAP - 1 then
                 local expToNext = capState.ExpToNextLevel
                 if expToNext ~= nil and expToNext > 0 and adjustedAmount > expToNext then
-                    logCap(string.format(
-                        "EXP uciety do level cap %d: %d -> %d za %s.",
+                    logCap(loc(
+                        "cap_level_cut",
                         LEVEL_CAP,
                         adjustedAmount,
                         expToNext,
-                        tostring(reason or "kill")
+                        tostring(reason or loc("unknown"))
                     ))
                     adjustedAmount = expToNext
                 end
@@ -868,11 +1202,11 @@ local function adjustExpForCaps(amount, reason)
         local talentPoints = capState.TalentPoints
         local pointsKind = capState.TalentPointsKind
         if talentPoints ~= nil and talentPoints >= TALENT_POINTS_CAP then
-            logCap(string.format(
-                "EXP pominiety: talent cap %d osiagniety (%d %s).",
+            logCap(loc(
+                "cap_talent_reached",
                 TALENT_POINTS_CAP,
                 talentPoints,
-                tostring(pointsKind or "points")
+                tostring(pointsKind or loc("unknown"))
             ))
             return 0
         end
@@ -948,7 +1282,7 @@ local function setTaskExp(task, amount)
     end)
 
     if not ok then
-        log("Nie ustawiono pola exp w UR5ScenarioTask_AddExp: " .. tostring(err))
+        log(loc("exp_field_failed", tostring(err)))
         return false
     end
 
@@ -1018,24 +1352,58 @@ local function isAwardKeyActive(key, now)
 end
 
 local function grantExpThroughScenarioTask(amount, reason)
+    bumpDiagnosticStat("GrantAttempts")
+
     local worldContext = primaryWorldContext()
+    diagnosticLog(function()
+        return loc(
+            "grant_request",
+            tostring(amount),
+            tostring(reason),
+            objectDebugName(worldContext)
+        )
+    end)
+
     if not isValid(worldContext) then
-        log("UR5ScenarioTask_AddExp: brak world context.")
+        resetPlayerRuntimeCache(loc("reason_missing_world_context"))
+        worldContext = primaryWorldContext()
+        diagnosticLog(function()
+            return loc("world_context_retry", objectDebugName(worldContext))
+        end)
+    end
+
+    if not isValid(worldContext) then
+        bumpDiagnosticStat("Errors")
+        log(loc("missing_world_context"))
         return false
     end
 
     local taskClass = addExpTaskClass()
     if not isValid(taskClass) then
-        log("UR5ScenarioTask_AddExp: brak klasy taska.")
+        bumpDiagnosticStat("Errors")
+        log(loc("missing_task_class"))
+        return false
+    end
+
+    diagnosticLog(function()
+        return loc("using_task_class", objectDebugName(taskClass))
+    end)
+
+    local liveTaskClass = unwrap(taskClass)
+    local liveWorldContext = unwrap(worldContext)
+    if liveTaskClass == nil or liveWorldContext == nil then
+        bumpDiagnosticStat("Errors")
+        log(loc("missing_live_context"))
         return false
     end
 
     local okConstruct, task = pcall(function()
-        return StaticConstructObject(taskClass, worldContext)
+        return StaticConstructObject(liveTaskClass, liveWorldContext)
     end)
 
     if not okConstruct or not isValid(task) then
-        log("UR5ScenarioTask_AddExp: StaticConstructObject nie utworzyl taska.")
+        bumpDiagnosticStat("Errors")
+        log(loc("task_construct_failed"))
         return false
     end
 
@@ -1054,23 +1422,37 @@ local function grantExpThroughScenarioTask(amount, reason)
         end)
     end
 
+    diagnosticLog(function()
+        return loc(
+            "prepared_task",
+            objectDebugName(character),
+            objectDebugName(currentScenarioGraph()),
+            objectDebugName(currentScenarioExecutor())
+        )
+    end)
+
     prepareScenarioTask(task)
 
     safeCall(task, "OnNodeCreated")
 
     local okInit, initErr = safeCall(task, "OnInit")
     if not okInit then
-        log("UR5ScenarioTask_AddExp: OnInit nie powiodlo sie: " .. tostring(initErr))
+        resetPlayerRuntimeCache(loc("reason_oninit_failed"))
+        bumpDiagnosticStat("Errors")
+        log(loc("oninit_failed", tostring(initErr)))
         return false
     end
 
     local okExec, execErr = safeCall(task, "OnExec")
     if not okExec then
-        log("UR5ScenarioTask_AddExp: OnExec nie powiodlo sie: " .. tostring(execErr))
+        resetPlayerRuntimeCache(loc("reason_onexec_failed"))
+        bumpDiagnosticStat("Errors")
+        log(loc("onexec_failed", tostring(execErr)))
         return false
     end
 
-    log(string.format("EXP: +%d za %s.", amount, tostring(reason or "kill")))
+    bumpDiagnosticStat("Granted")
+    log(loc("exp_awarded", amount, tostring(reason or loc("unknown"))))
     return true
 end
 
@@ -1089,12 +1471,19 @@ end
 
 local function awardExpForTarget(targetActor, sourceName)
     if not isValid(targetActor) then
+        diagnosticLog(loc("skip_invalid_target", tostring(sourceName)))
+        maybeLogDiagnosticSummary(os.time())
         return false
     end
 
     local now = os.time()
     local key = objectAddress(targetActor)
     if isAwardKeyActive(key, now) then
+        bumpDiagnosticStat("Duplicates")
+        diagnosticLog(function()
+            return loc("skip_duplicate", tostring(sourceName), objectDebugName(targetActor))
+        end)
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
@@ -1102,13 +1491,44 @@ local function awardExpForTarget(targetActor, sourceName)
     if amount == nil or amount <= 0 then
         if amount == nil and noMatchLogs < NO_MATCH_LOG_LIMIT then
             noMatchLogs = noMatchLogs + 1
-            log("Brak reguly EXP dla " .. tostring(sourceName) .. ": " .. objectText(targetActor))
+            log(loc("no_rule", tostring(sourceName), objectText(targetActor)))
         end
+
+        diagnosticLog(function()
+            return loc(
+                "no_exp_awarded",
+                tostring(sourceName),
+                objectDebugName(targetActor),
+                tostring(matchedPattern),
+                tostring(amount)
+            )
+        end)
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
+    diagnosticLog(function()
+        return loc(
+            "matched_rule",
+            tostring(sourceName),
+            objectDebugName(targetActor),
+            tostring(matchedPattern),
+            amount
+        )
+    end)
+
     amount = adjustExpForCaps(amount, matchedPattern)
     if amount == nil or amount <= 0 then
+        bumpDiagnosticStat("CapBlocked")
+        diagnosticLog(function()
+            return loc(
+                "blocked_by_caps",
+                tostring(sourceName),
+                objectDebugName(targetActor),
+                tostring(matchedPattern)
+            )
+        end)
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
@@ -1119,6 +1539,9 @@ local function awardExpForTarget(targetActor, sourceName)
     end
 
     if isAwardKeyActive(key, now) then
+        bumpDiagnosticStat("Duplicates")
+        diagnosticLog(loc("skip_duplicate_fallback", tostring(sourceName), tostring(key)))
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
@@ -1134,7 +1557,9 @@ local function awardExpForTarget(targetActor, sourceName)
         if key ~= nil and key ~= "" then
             awardedKills[key] = nil
         end
-        log("Blad podczas dodawania EXP przez " .. tostring(sourceName) .. ": " .. tostring(result))
+        bumpDiagnosticStat("Errors")
+        log(loc("add_exp_error", tostring(sourceName), tostring(result)))
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
@@ -1142,9 +1567,12 @@ local function awardExpForTarget(targetActor, sourceName)
         if key ~= nil and key ~= "" then
             awardedKills[key] = nil
         end
+        bumpDiagnosticStat("Errors")
+        maybeLogDiagnosticSummary(now)
         return false
     end
 
+    maybeLogDiagnosticSummary(now)
     return true
 end
 
@@ -1168,17 +1596,38 @@ local function ownerFromComponent(component)
 end
 
 local function handleKillDamage(targetParam, killParam, sourceName)
+    local now = os.time()
+
     if not isTrue(killParam) then
+        bumpDiagnosticStat("NonKillEvents")
+        diagnosticCombatLog(loc("non_kill_ignored", tostring(sourceName)))
+        maybeLogDiagnosticSummary(now)
         return
     end
 
+    bumpDiagnosticStat("KillEvents")
+
+    diagnosticLog(function()
+        return loc("kill_received", tostring(sourceName), objectDebugName(targetParam))
+    end)
+
     awardExpForTarget(unwrap(targetParam), sourceName)
+    maybeLogDiagnosticSummary(now)
 end
 
 local function handleDamageInstance(damageInstanceParam, sourceName)
     local damageInstance = unwrap(damageInstanceParam)
     local targetActor = safeRead(damageInstance, "Target")
     local isKillDamage = safeRead(damageInstance, "bIsKillDamage")
+
+    diagnosticCombatLog(function()
+        return loc(
+            "damage_instance",
+            tostring(sourceName),
+            objectDebugName(targetActor),
+            tostring(unwrap(isKillDamage))
+        )
+    end)
 
     handleKillDamage(targetActor, isKillDamage, sourceName)
 end
@@ -1189,8 +1638,14 @@ local function handleDeathComponent(context)
         return
     end
 
+    diagnosticLog(function()
+        return loc("death_component_update", objectDebugName(ownerFromComponent(component)))
+    end)
+    resetPlayerRuntimeCache("OnRep_DeathEventData")
+
     local deathEventData = safeRead(component, "DeathEventData")
     if not isTrue(safeRead(deathEventData, "bDead")) then
+        diagnosticLog(loc("death_component_ignored"))
         return
     end
 
@@ -1203,10 +1658,19 @@ local function registerHookSafe(path, callback)
     end)
 
     if ok then
-        log("Hook aktywny: " .. path)
+        log(loc("hook_active", path))
     else
-        log("Hook niedostepny: " .. path .. " / " .. tostring(err))
+        log(loc("hook_unavailable", path, tostring(err)))
     end
+end
+
+local function registerHookOptional(path, enabled, callback)
+    if enabled then
+        registerHookSafe(path, callback)
+        return
+    end
+
+    diagnosticLog(loc("hook_disabled", path))
 end
 
 if type(ExecuteWithDelay) == "function" then
@@ -1224,21 +1688,22 @@ if type(ExecuteWithDelay) == "function" then
     end)
 end
 
-registerHookSafe("/Script/R5.R5DamageUIComponent:OnASCDamageDealt",
+registerHookOptional("/Script/R5.R5DamageUIComponent:OnASCDamageDealt", ENABLE_HOOK_DAMAGE_UI,
     function(context, targetActor, incomingDamage, dealtDamage, armorReduction, isKillDamage, effectSpec)
         handleKillDamage(targetActor, isKillDamage, "DamageUI")
     end)
 
-registerHookSafe("/Script/R5.R5DamageUIComponent:ClientDamageDealt", function(context, damageInstance)
+registerHookOptional("/Script/R5.R5DamageUIComponent:ClientDamageDealt", ENABLE_HOOK_CLIENT_DAMAGE_DEALT, function(context, damageInstance)
     handleDamageInstance(damageInstance, "ClientDamageDealt")
 end)
 
-registerHookSafe("/Script/R5.R5DamageUIComponent:NetMulticastDamageDealt", function(context, damageInstance)
+registerHookOptional("/Script/R5.R5DamageUIComponent:NetMulticastDamageDealt", ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT, function(context, damageInstance)
     handleDamageInstance(damageInstance, "NetMulticastDamageDealt")
 end)
 
-registerHookSafe("/Script/R5.R5DeathComponent:OnRep_DeathEventData", function(context)
+registerHookOptional("/Script/R5.R5DeathComponent:OnRep_DeathEventData", ENABLE_HOOK_DEATH_COMPONENT, function(context)
     handleDeathComponent(context)
 end)
 
-log("Build " .. MOD_BUILD .. " zaladowany.")
+log(loc("build_loaded", MOD_BUILD))
+diagnosticLog(loc("diag_ready"))
