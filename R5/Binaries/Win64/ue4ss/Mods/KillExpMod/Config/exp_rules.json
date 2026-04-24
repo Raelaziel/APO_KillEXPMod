@@ -98,6 +98,10 @@
     { "group": "Ships", "pattern": "BP_Ship_Brig_Brethren_C", "exp": 320, "note": "Brethren brig" },
     { "group": "Ships", "pattern": "BP_Ship_Cutter_Black_C", "exp": 240, "note": "Black cutter" },
     { "group": "Ships", "pattern": "BP_Ship_Ketch_BlackBeard_C", "exp": 180, "note": "Blackbeard ketch" },
-    { "group": "Ships", "pattern": "BP_Ship_Ketch_Brethren_C", "exp": 180, "note": "Brethren ketch" }
+    { "group": "Ships", "pattern": "BP_Ship_Ketch_Brethren_C", "exp": 180, "note": "Brethren ketch" },
+
+    { "group": "Catch-all fallback", "pattern": "BP_Mob_", "exp": 0, "note": "Fallback for unknown mob" },
+    { "group": "Catch-all fallback", "pattern": "BP_AIShip_", "exp": 0, "note": "Fallback for unknown ship" },
+    { "group": "Catch-all fallback", "pattern": "BP_Ship_", "exp": 0, "note": "Fallback for unknown ship" }
   ]
 }

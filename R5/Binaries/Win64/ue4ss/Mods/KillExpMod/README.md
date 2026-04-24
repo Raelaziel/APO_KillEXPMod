@@ -9,7 +9,7 @@ The mod is built to be editable without Lua knowledge. EXP values, target rules,
 Current build:
 
 ```text
-2026-04-24-i18n-diag
+2026-04-24-modular
 ```
 
 What works:
@@ -17,7 +17,7 @@ What works:
 - Grants EXP after a valid kill.
 - Uses Windrose's own EXP reward path, so the normal in-game EXP notification can appear.
 - Reads mob and ship EXP values from `Config/exp_rules.json`.
-- Ships with 69 default target rules split into wildlife, undead, pirates, corrupted enemies, bosses, and ships.
+- Ships with 72 default target rules split into wildlife, undead, pirates, corrupted enemies, bosses, ships, and catch-all fallbacks.
 - Supports friendly/player-owned exclusions by setting EXP to `0`.
 - Supports configurable level and talent point caps for kill EXP.
 - Prevents duplicate EXP from the same killed actor.
@@ -25,8 +25,20 @@ What works:
 - Correctly grants EXP after player death and respawn (stale UE object cache is now invalidated on pawn change).
 - Optional diagnostic logging and periodic summary counters for troubleshooting.
 - Log language configurable to `en` or `pl`.
+- Script logic split into focused modules (`ue_util`, `diag`, `player_cache`, `exp_grant`) with a thinner `main.lua` bootstrap.
 
 ## Changelog
+
+### 2026-04-24-modular
+
+- **Modular refactor**: Split the previous monolithic `Scripts/main.lua` into focused modules:
+  - `Scripts/ue_util.lua`: UE object safety/access helpers.
+  - `Scripts/diag.lua`: logging, localization bridge, and diagnostic counters/summary.
+  - `Scripts/player_cache.lua`: runtime player/scenario caches and cap-state handling.
+  - `Scripts/exp_grant.lua`: rule matching, dedupe cache, and EXP task execution.
+- **Entry-point cleanup**: `Scripts/main.lua` now acts as bootstrap + hook wiring only (config load, module init, prewarm, hook registration).
+- **Repetition reduction**: `awardExpForTarget` no longer calls diagnostic summary on every early-return branch; summary still runs on successful grant and from event flow.
+- **Hook handler simplification**: unified direct-kill and damage-instance paths into one shared damage handler in `main.lua`.
 
 ### 2026-04-24-i18n-diag
 
@@ -69,6 +81,10 @@ KillExpMod/
     log_localization.lua
   Scripts/
     main.lua
+    ue_util.lua
+    diag.lua
+    player_cache.lua
+    exp_grant.lua
     kill_exp_config.lua
 ```
 
@@ -114,7 +130,7 @@ Rule order matters. Put more specific patterns above general fallback patterns.
 
 Current default table:
 
-- 69 rules.
+- 72 rules.
 - EXP range is `0` to `700`.
 - `0` EXP entries are used for friendly/player-owned actors that should not reward EXP.
 - Rule groups include wildlife, undead, human enemies, Senkamati corrupted, bosses, and ships.
@@ -136,7 +152,7 @@ The top of `exp_rules.json` contains:
   "enable_hook_death_component": true,
   "dedupe_ttl_seconds": 30,
   "prewarm_delay_ms": 2000,
-  "no_match_log_limit": 5,
+  "no_match_log_limit": 0,
   "cap_log_limit": 5,
   "level_cap": 100,
   "talent_points_cap": 300,
@@ -160,7 +176,7 @@ Settings:
 - `enable_hook_death_component`: set to `false` to disable the death component hook.
 - `dedupe_ttl_seconds`: how long a killed actor stays in the duplicate protection cache.
 - `prewarm_delay_ms`: delay after load before the mod prewarms the EXP reward path.
-- `no_match_log_limit`: max number of missing-rule logs per session.
+- `no_match_log_limit`: max number of missing-rule logs per session. Set to `0` for unlimited logging.
 - `cap_log_limit`: max number of cap-related logs per session.
 - `level_cap`: kill EXP is skipped once the player is at this level or above.
 - `talent_points_cap`: kill EXP is skipped if the loaded talent UI/progression VM reports this many available talent points or more.
@@ -262,6 +278,10 @@ Main logic:
 
 ```text
 R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/main.lua
+R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/ue_util.lua
+R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/diag.lua
+R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/player_cache.lua
+R5/Binaries/Win64/ue4ss/Mods/KillExpMod/Scripts/exp_grant.lua
 ```
 
 Config loader:
