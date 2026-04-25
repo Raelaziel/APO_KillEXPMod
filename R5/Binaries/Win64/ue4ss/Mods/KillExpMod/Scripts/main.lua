@@ -201,20 +201,33 @@ else
         })
 
         -- ── Prewarm ───────────────────────────────────────────────────────────
+        -- Runs once after PREWARM_DELAY_MS and retries every 5 s until all
+        -- key objects are successfully cached. This prevents multiple cold
+        -- FindFirstOf scans (O(n) over the entire GUObjectArray) from landing
+        -- on the game thread during the player's first kill of the session.
 
         if type(ExecuteWithDelay) == "function" then
-            pcall(function()
-                ExecuteWithDelay(PREWARM_DELAY_MS, function()
-                    Grant.addExpTaskClass()
-                    Cache.primaryWorldContext()
-                    Cache.currentProgressionObserver()
-                    Cache.currentEntityProgressionVM()
-                    Cache.currentTalentTreeVM()
-                    Cache.currentScenarioExecutor()
-                    Cache.currentScenarioGraph()
-                    Cache.currentCapState()
-                end)
-            end)
+            local PREWARM_RETRY_MS = 5000
+
+            local function prewarmAttempt()
+                Grant.addExpTaskClass()
+                Cache.primaryWorldContext()
+                Cache.currentProgressionObserver()
+                Cache.currentEntityProgressionVM()
+                Cache.currentTalentTreeVM()
+                Cache.currentScenarioExecutor()
+                Cache.currentScenarioGraph()
+                Cache.currentCapState()
+
+                if not Cache.isWarmed() then
+                    dlog(loc("prewarm_retry", PREWARM_RETRY_MS))
+                    pcall(ExecuteWithDelay, PREWARM_RETRY_MS, prewarmAttempt)
+                else
+                    dlog(loc("prewarm_complete"))
+                end
+            end
+
+            pcall(ExecuteWithDelay, PREWARM_DELAY_MS, prewarmAttempt)
         end
 
         -- ── Hook registration ─────────────────────────────────────────────────
