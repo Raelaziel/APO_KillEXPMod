@@ -509,13 +509,13 @@ local function makeCache(UU, Diag)
         return adjustedAmount
     end
 
-    -- Returns true when the objects that are most expensive to cold-look-up via
-    -- FindFirstOf (ProgressionObserver, TalentTreeVM, ScenarioExecutor) are all
-    -- cached, meaning the prewarm succeeded and the first kill will be hitch-free.
+    -- Returns true when key kill-path objects are cached. TalentTreeVM is optional
+    -- because it may never exist unless specific UI/state is opened.
     function M.isWarmed()
-        return isValid(cachedProgressionObserver)
-            and isValid(cachedTalentTreeVM)
-            and isValid(cachedScenarioExecutor)
+        local hasPlayerProgression = isValid(cachedProgressionObserver)
+            or isValid(cachedEntityProgressionVM)
+
+        return hasPlayerProgression and isValid(cachedScenarioExecutor)
     end
 
     function M.primaryWorldContext()

@@ -57,6 +57,12 @@ local ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT = true
 local ENABLE_HOOK_DEATH_COMPONENT            = true
 local DEDUPE_TTL_SECONDS                     = 30
 local PREWARM_DELAY_MS                       = 2000
+local PREWARM_WAIT_FOR_PLAYER                = true
+local PREWARM_WAIT_RETRY_MS                  = 1000
+local PREWARM_WAIT_LOG_EVERY                 = 10
+local PREWARM_RETRY_MS                       = 5000
+local PREWARM_MAX_ATTEMPTS                   = 18
+local PREWARM_LOG_EVERY                      = 3
 local NO_MATCH_LOG_LIMIT                     = 5
 local CAP_LOG_LIMIT                          = 5
 local LEVEL_CAP                              = 100
@@ -144,6 +150,12 @@ else
             ENABLE_HOOK_DEATH_COMPONENT)
         DEDUPE_TTL_SECONDS                     = settingInt(s, "dedupe_ttl_seconds", DEDUPE_TTL_SECONDS)
         PREWARM_DELAY_MS                       = settingInt(s, "prewarm_delay_ms", PREWARM_DELAY_MS)
+        PREWARM_WAIT_FOR_PLAYER                = settingBool(s, "prewarm_wait_for_player", PREWARM_WAIT_FOR_PLAYER)
+        PREWARM_WAIT_RETRY_MS                  = settingInt(s, "prewarm_wait_retry_ms", PREWARM_WAIT_RETRY_MS)
+        PREWARM_WAIT_LOG_EVERY                 = settingInt(s, "prewarm_wait_log_every", PREWARM_WAIT_LOG_EVERY)
+        PREWARM_RETRY_MS                       = settingInt(s, "prewarm_retry_ms", PREWARM_RETRY_MS)
+        PREWARM_MAX_ATTEMPTS                   = settingInt(s, "prewarm_max_attempts", PREWARM_MAX_ATTEMPTS)
+        PREWARM_LOG_EVERY                      = settingInt(s, "prewarm_log_every", PREWARM_LOG_EVERY)
         NO_MATCH_LOG_LIMIT                     = settingInt(s, "no_match_log_limit", NO_MATCH_LOG_LIMIT)
         CAP_LOG_LIMIT                          = settingInt(s, "cap_log_limit", CAP_LOG_LIMIT)
         LEVEL_CAP                              = settingInt(s, "level_cap", LEVEL_CAP)
@@ -207,9 +219,23 @@ else
         -- on the game thread during the player's first kill of the session.
 
         if type(ExecuteWithDelay) == "function" then
-            local PREWARM_RETRY_MS = 5000
+            local prewarmAttempts = 0
+            local prewarmWaitAttempts = 0
+            if PREWARM_MAX_ATTEMPTS < 1 then PREWARM_MAX_ATTEMPTS = 1 end
+            if PREWARM_WAIT_LOG_EVERY < 1 then PREWARM_WAIT_LOG_EVERY = 1 end
+            if PREWARM_LOG_EVERY < 1 then PREWARM_LOG_EVERY = 1 end
+            if PREWARM_WAIT_RETRY_MS < 250 then PREWARM_WAIT_RETRY_MS = 250 end
+            if PREWARM_RETRY_MS < 500 then PREWARM_RETRY_MS = 500 end
+
+            local function hasPlayerReady()
+                return UU.isValid(Cache.currentPlayerController())
+                    or UU.isValid(Cache.currentPlayerCharacter())
+                    or UU.isValid(Cache.currentPlayerState())
+            end
 
             local function prewarmAttempt()
+                prewarmAttempts = prewarmAttempts + 1
+
                 Grant.addExpTaskClass()
                 Cache.primaryWorldContext()
                 Cache.currentProgressionObserver()
@@ -219,15 +245,52 @@ else
                 Cache.currentScenarioGraph()
                 Cache.currentCapState()
 
-                if not Cache.isWarmed() then
-                    dlog(loc("prewarm_retry", PREWARM_RETRY_MS))
-                    pcall(ExecuteWithDelay, PREWARM_RETRY_MS, prewarmAttempt)
-                else
+                if Cache.isWarmed() then
                     dlog(loc("prewarm_complete"))
+                    return
+                end
+
+                if prewarmAttempts >= PREWARM_MAX_ATTEMPTS then
+                    dlog(string.format(
+                        "Prewarm: stopping after %d attempts; continuing with lazy cache warmup.",
+                        prewarmAttempts
+                    ))
+                    return
+                end
+
+                if prewarmAttempts <= 2 or (prewarmAttempts % PREWARM_LOG_EVERY) == 0 then
+                    dlog(loc("prewarm_retry", PREWARM_RETRY_MS))
+                end
+
+                local okDelay, errDelay = pcall(ExecuteWithDelay, PREWARM_RETRY_MS, prewarmAttempt)
+                if not okDelay then
+                    dlog(string.format("Prewarm: retry scheduling failed: %s", tostring(errDelay)))
                 end
             end
 
-            pcall(ExecuteWithDelay, PREWARM_DELAY_MS, prewarmAttempt)
+            local function waitForPlayerAndPrewarm()
+                if (not PREWARM_WAIT_FOR_PLAYER) or hasPlayerReady() then
+                    dlog("Prewarm: player ready, starting prewarm checks.")
+                    prewarmAttempt()
+                    return
+                end
+
+                prewarmWaitAttempts = prewarmWaitAttempts + 1
+                if prewarmWaitAttempts <= 2 or (prewarmWaitAttempts % PREWARM_WAIT_LOG_EVERY) == 0 then
+                    dlog(string.format(
+                        "Prewarm: waiting for player spawn (attempt %d, retry in %d ms).",
+                        prewarmWaitAttempts,
+                        PREWARM_WAIT_RETRY_MS
+                    ))
+                end
+
+                local okDelay, errDelay = pcall(ExecuteWithDelay, PREWARM_WAIT_RETRY_MS, waitForPlayerAndPrewarm)
+                if not okDelay then
+                    dlog(string.format("Prewarm: player-wait scheduling failed: %s", tostring(errDelay)))
+                end
+            end
+
+            pcall(ExecuteWithDelay, PREWARM_DELAY_MS, waitForPlayerAndPrewarm)
         end
 
         -- ── Hook registration ─────────────────────────────────────────────────
@@ -251,13 +314,16 @@ else
 
         -- Handles both raw target+kill-flag and damage-instance forms.
         -- Pass damageInstanceParam=nil when calling with a direct target+kill pair.
-        local function handleDamage(targetParam, killParam, sourceName, damageInstanceParam)
+        local function handleDamage(targetParam, killParam, sourceName, damageInstanceParam, effectSpecParam, contextParam)
             local now = os.time()
 
             if damageInstanceParam ~= nil then
                 local damageInstance = UU.unwrap(damageInstanceParam)
                 targetParam          = UU.safeRead(damageInstance, "Target")
                 killParam            = UU.safeRead(damageInstance, "bIsKillDamage")
+                if effectSpecParam == nil then
+                    effectSpecParam = UU.safeRead(damageInstance, "EffectSpec")
+                end
 
                 Diag.diagnosticCombatLog(function()
                     return loc("damage_instance", tostring(sourceName),
@@ -307,21 +373,21 @@ else
             "/Script/R5.R5DamageUIComponent:OnASCDamageDealt",
             ENABLE_HOOK_DAMAGE_UI,
             function(context, targetActor, incomingDamage, dealtDamage, armorReduction, isKillDamage, effectSpec)
-                handleDamage(targetActor, isKillDamage, "DamageUI", nil)
+                handleDamage(targetActor, isKillDamage, "DamageUI", nil, effectSpec, context)
             end)
 
         registerHookOptional(
             "/Script/R5.R5DamageUIComponent:ClientDamageDealt",
             ENABLE_HOOK_CLIENT_DAMAGE_DEALT,
             function(context, damageInstance)
-                handleDamage(nil, nil, "ClientDamageDealt", damageInstance)
+                handleDamage(nil, nil, "ClientDamageDealt", damageInstance, nil, context)
             end)
 
         registerHookOptional(
             "/Script/R5.R5DamageUIComponent:NetMulticastDamageDealt",
             ENABLE_HOOK_NET_MULTICAST_DAMAGE_DEALT,
             function(context, damageInstance)
-                handleDamage(nil, nil, "NetMulticastDamageDealt", damageInstance)
+                handleDamage(nil, nil, "NetMulticastDamageDealt", damageInstance, nil, context)
             end)
 
         registerHookOptional(
